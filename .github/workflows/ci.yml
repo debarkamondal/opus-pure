@@ -7,15 +7,14 @@ name: CI
 # are the only place those kernels execute, and Windows is also the only place a
 # non-Apple libm is exercised.
 
-# Manual-only, deliberately. This repository is private for now, where Actions
-# minutes bill against a monthly allowance and the macOS and Windows legs carry
-# 10x and 2x multipliers — four legs on every push would drain it, and the ARM
-# Linux runner is free only on public repositories. Uncomment the two triggers
-# below when the repository goes public, where every leg here costs nothing.
+# Every leg runs on push and on pull requests. This repository is public, where
+# none of these runners bill against an allowance — including the ARM Linux one,
+# which is free only on public repositories. `workflow_dispatch` stays so a run
+# can be started by hand without an empty commit.
 on:
-  # push:
-  #   branches: [main]
-  # pull_request:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 # A newer push makes the older run's answer stale before it finishes.
