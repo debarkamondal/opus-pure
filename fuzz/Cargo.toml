@@ -1,0 +1,48 @@
+# Coverage-guided fuzzing of everything that reads bytes this crate did not
+# write: the decoder, the Ogg container parser, and the packet inspectors.
+#
+#   cargo +nightly fuzz run decode_stream
+#   cargo +nightly fuzz run ogg_read
+#   cargo +nightly fuzz run packet_shape
+#
+# A package of its own rather than a workspace member, like `reference/rust`:
+# the crate under test is a path dependency, so a target builds exactly what a
+# downstream caller would get, and `exclude` in the root `Cargo.toml` keeps this
+# directory out of the published `.crate`. It needs nightly, which is what
+# `-Z sanitizer=address` requires; nothing in the library does.
+[package]
+name = "opus-pure-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+opus-pure = { path = ".." }
+
+# The bodies live in `tests/common/fuzz.rs` so that `tests/fuzz_corpus.rs` can
+# replay a corpus through the same code on an ordinary `cargo test`. Each
+# target here is the two lines that hand libFuzzer's bytes to one of them.
+[[bin]]
+name = "decode_stream"
+path = "fuzz_targets/decode_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ogg_read"
+path = "fuzz_targets/ogg_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_shape"
+path = "fuzz_targets/packet_shape.rs"
+test = false
+doc = false
+bench = false

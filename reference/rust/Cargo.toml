@@ -1,0 +1,115 @@
+# Every Rust-side reference tool, in one package.
+#
+# They live together rather than one per topic directory so that a single
+# `cargo build --manifest-path reference/rust/Cargo.toml` compiles all of them
+# against the current crate. A tool that stops building is then a build failure
+# rather than a surprise the next time someone reaches for it, and they can
+# share `common.rs` instead of each carrying its own copy of the signal
+# generators — copies that had already gone stale before this package existed.
+#
+# Not a workspace member: the crate under test is a path dependency, so these
+# build exactly what a downstream user would get. `exclude` in the root
+# `Cargo.toml` keeps the directory out of the published `.crate`.
+[package]
+name = "opus-pure-reference"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+opus-pure = { path = "../..", features = ["probe"] }
+
+# --- the sweep against libopus, driven by ../interop/run_sweep.sh -------------
+[[bin]]
+name = "sweep"
+path = "src/sweep.rs"
+
+[[bin]]
+name = "focus"
+path = "src/focus.rs"
+
+[[bin]]
+name = "sixty"
+path = "src/sixty.rs"
+
+[[bin]]
+name = "dec"
+path = "src/dec.rs"
+
+# --- cross-checks that pin a tracked test's frozen values ---------------------
+[[bin]]
+name = "vector_check"
+path = "src/vector_check.rs"
+
+[[bin]]
+name = "plc"
+path = "src/plc.rs"
+
+[[bin]]
+name = "mfprobe"
+path = "src/mfprobe.rs"
+
+[[bin]]
+name = "dumppcm"
+path = "src/dumppcm.rs"
+
+# --- single-config probes kept from earlier investigations --------------------
+[[bin]]
+name = "gen"
+path = "src/gen.rs"
+
+[[bin]]
+name = "one"
+path = "src/one.rs"
+
+[[bin]]
+name = "ms"
+path = "src/ms.rs"
+
+[[bin]]
+name = "qual"
+path = "src/qual.rs"
+
+[[bin]]
+name = "hybrid"
+path = "src/hybrid.rs"
+
+[[bin]]
+name = "lag"
+path = "src/lag.rs"
+
+[[bin]]
+name = "band"
+path = "src/band.rs"
+
+[[bin]]
+name = "seamprobe"
+path = "src/seamprobe.rs"
+
+[[bin]]
+name = "stereoprobe"
+path = "src/stereoprobe.rs"
+
+[[bin]]
+name = "stereoqual"
+path = "src/stereoqual.rs"
+
+[[bin]]
+name = "parchunk"
+path = "src/parchunk.rs"
+
+# --- speed against libopus, driven by ../speed/run.sh -------------------------
+[[bin]]
+name = "rspeed"
+path = "src/speed.rs"
+
+[[bin]]
+name = "split"
+path = "src/split.rs"
+
+# Line tables in the optimised build. They do not change codegen, and without
+# them a sampling profiler can only name the function a sample landed in --
+# which is not enough when the function in question is a decode driver with
+# half the range decoder inlined into it.
+[profile.release]
+debug = 1

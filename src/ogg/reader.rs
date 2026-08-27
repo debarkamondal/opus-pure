@@ -1,0 +1,336 @@
+//! Ogg Opus demuxer.
+
+use std::io::Read;
+
+use super::header::{OpusHead, OpusTags};
+use super::page::{CAPTURE_PATTERN, HEADER_LEN, MAX_PAGE_PAYLOAD, PageHeader, verify_crc};
+use crate::{Error, Result};
+
+/// One Opus packet recovered from the container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OggPacket {
+    /// The packet, ready to hand to a decoder.
+    pub data: Vec<u8>,
+    /// Granule position of the page this packet completed on, or `-1` if that
+    /// page completed no packet. This is a *page* property: several packets
+    /// completing on one page all report the same value, which is the granule
+    /// after the last of them.
+    pub page_granule: i64,
+    /// The packet completed the final page of the stream.
+    pub end_of_stream: bool,
+}
+
+/// Reads Opus packets out of an Ogg stream (RFC 7845).
+///
+/// The constructor consumes the two header packets, so [`head`](Self::head) and
+/// [`tags`](Self::tags) are available immediately and
+/// [`read_packet`](Self::read_packet) yields audio from the first call.
+///
+/// Pages failing their CRC are an error rather than a silent skip: a truncated
+/// or corrupt file should not decode as if it were fine.
+///
+/// ```no_run
+/// use opus_pure::OggOpusReader;
+///
+/// let file = std::fs::File::open("in.opus")?;
+/// let mut r = OggOpusReader::new(file)?;
+/// println!("{} channels, pre-skip {}", r.head().channel_count, r.head().pre_skip);
+/// while let Some(packet) = r.read_packet()? {
+///     // decoder.decode(&packet.data, ...)
+///     let _ = packet;
+/// }
+/// # Ok::<(), opus_pure::Error>(())
+/// ```
+pub struct OggOpusReader<R: Read> {
+    source: R,
+    head: OpusHead,
+    tags: OpusTags,
+    serial: u32,
+
+    /// Packets fully recovered from the last page read, oldest first.
+    ready: std::collections::VecDeque<OggPacket>,
+    /// Bytes of a packet that spilled past the end of a page.
+    partial: Vec<u8>,
+    /// The last page carried the end-of-stream flag.
+    saw_eos: bool,
+    /// The source returned EOF.
+    exhausted: bool,
+}
+
+/// Shows where the reader has got to in the stream.
+///
+/// Deliberately does not require `R: Debug`: the source is a file or a socket
+/// far more often than it is something printable, and requiring it would leave
+/// most readers with no `Debug` at all.
+impl<R: Read> std::fmt::Debug for OggOpusReader<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OggOpusReader")
+            .field("head", &self.head)
+            .field("serial", &format_args!("{:#010x}", self.serial))
+            .field("packets_ready", &self.ready.len())
+            .field("saw_eos", &self.saw_eos)
+            .field("exhausted", &self.exhausted)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: Read> OggOpusReader<R> {
+    /// Read the header packets and position the reader at the first audio
+    /// packet.
+    pub fn new(source: R) -> Result<Self> {
+        let mut r = OggOpusReader {
+            source,
+            head: OpusHead::new(1, 0)?,
+            tags: OpusTags::new(),
+            serial: 0,
+            ready: std::collections::VecDeque::new(),
+            partial: Vec::new(),
+            saw_eos: false,
+            exhausted: false,
+        };
+
+        let first = r
+            .next_packet_raw()?
+            .ok_or(Error::InvalidStream("stream ends before OpusHead"))?;
+        r.head = OpusHead::parse(&first.data)?;
+
+        let second = r
+            .next_packet_raw()?
+            .ok_or(Error::InvalidStream("stream ends before OpusTags"))?;
+        r.tags = OpusTags::parse(&second.data)?;
+
+        Ok(r)
+    }
+
+    /// The stream's identification header.
+    pub fn head(&self) -> &OpusHead {
+        &self.head
+    }
+
+    /// The stream's comment header.
+    pub fn tags(&self) -> &OpusTags {
+        &self.tags
+    }
+
+    /// Serial number of the logical bitstream being read.
+    pub fn serial(&self) -> u32 {
+        self.serial
+    }
+
+    /// The next audio packet, or `None` at end of stream.
+    pub fn read_packet(&mut self) -> Result<Option<OggPacket>> {
+        self.next_packet_raw()
+    }
+
+    /// The remaining audio packets, as an iterator.
+    ///
+    /// The same packets [`read_packet`](Self::read_packet) yields, in a form
+    /// that composes: `for`, `take_while`, `filter`, or
+    /// `collect::<Result<Vec<_>>>()` to stop at the first error.
+    ///
+    /// ```
+    /// # use opus_pure::{OggOpusReader, Result};
+    /// # fn f(bytes: &[u8]) -> Result<()> {
+    /// let mut reader = OggOpusReader::new(std::io::Cursor::new(bytes))?;
+    /// for packet in reader.packets() {
+    ///     let packet = packet?;
+    ///     // ... decode packet.data
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The iterator ends at the first error as well as at end of stream, so a
+    /// truncated file stops rather than looping.
+    pub fn packets(&mut self) -> Packets<'_, R> {
+        Packets {
+            reader: self,
+            done: false,
+        }
+    }
+
+    /// The underlying reader, giving up the ability to read further packets.
+    pub fn into_inner(self) -> R {
+        self.source
+    }
+
+    /// The underlying reader.
+    pub fn get_ref(&self) -> &R {
+        &self.source
+    }
+
+    fn next_packet_raw(&mut self) -> Result<Option<OggPacket>> {
+        loop {
+            if let Some(p) = self.ready.pop_front() {
+                return Ok(Some(p));
+            }
+            if self.saw_eos || self.exhausted {
+                // A packet still in `partial` was cut off by the end of the
+                // stream; report that rather than returning it as if complete.
+                if !self.partial.is_empty() {
+                    self.partial.clear();
+                    return Err(Error::InvalidStream(
+                        "stream ends in the middle of a packet",
+                    ));
+                }
+                return Ok(None);
+            }
+            self.read_page()?;
+        }
+    }
+
+    /// Read one page and split it into packets, appending to `ready`.
+    fn read_page(&mut self) -> Result<()> {
+        let Some(raw) = self.read_page_header()? else {
+            self.exhausted = true;
+            return Ok(());
+        };
+        let header = PageHeader::parse(&raw)?;
+
+        if header.segment_count == 0 {
+            return Err(Error::InvalidStream("page has an empty segment table"));
+        }
+
+        let mut segments = vec![0u8; header.segment_count as usize];
+        read_exact(&mut self.source, &mut segments)?;
+        let payload_len: usize = segments.iter().map(|&s| s as usize).sum();
+        debug_assert!(payload_len <= MAX_PAGE_PAYLOAD);
+        let mut payload = vec![0u8; payload_len];
+        read_exact(&mut self.source, &mut payload)?;
+
+        if !verify_crc(&raw, &segments, &payload, header.crc) {
+            return Err(Error::InvalidStream("page CRC mismatch"));
+        }
+
+        if header.is_bos() {
+            self.serial = header.serial;
+        } else if header.serial != self.serial {
+            // Multiplexed or chained streams are out of scope: a second logical
+            // stream would need its own decoder state and pre-skip.
+            return Err(Error::InvalidStream(
+                "stream contains more than one logical bitstream",
+            ));
+        }
+
+        // A page that claims to continue a packet when none is pending — or that
+        // starts fresh while one is pending — means pages were lost or reordered.
+        if header.is_continued() == self.partial.is_empty() {
+            self.partial.clear();
+            return Err(Error::InvalidStream(
+                "page continuation flag does not match the pending packet",
+            ));
+        }
+
+        self.saw_eos = header.is_eos();
+
+        let mut off = 0usize;
+        for (i, &lace) in segments.iter().enumerate() {
+            self.partial
+                .extend_from_slice(&payload[off..off + lace as usize]);
+            off += lace as usize;
+
+            if lace < 255 {
+                // Terminating segment: the packet is complete.
+                let data = std::mem::take(&mut self.partial);
+                let last_segment = i + 1 == segments.len();
+                if !data.is_empty() {
+                    self.ready.push_back(OggPacket {
+                        data,
+                        page_granule: header.granule_position,
+                        end_of_stream: self.saw_eos && last_segment,
+                    });
+                }
+                // An empty packet is dropped: muxers emit one as the payload of
+                // a bare EOS page, and it is not decodable audio.
+            }
+        }
+        Ok(())
+    }
+
+    /// Find and read the next page header, resynchronising on the capture
+    /// pattern if the stream does not sit on a page boundary.
+    fn read_page_header(&mut self) -> Result<Option<[u8; HEADER_LEN]>> {
+        let mut buf = [0u8; HEADER_LEN];
+        match read_exact_or_eof(&mut self.source, &mut buf)? {
+            0 => return Ok(None),
+            n if n < HEADER_LEN => {
+                return Err(Error::InvalidStream("stream ends inside a page header"));
+            }
+            _ => {}
+        }
+        if &buf[0..4] == CAPTURE_PATTERN {
+            return Ok(Some(buf));
+        }
+
+        // Resync: slide a one-byte window until the capture pattern appears.
+        // Bounded so a stream of garbage terminates instead of spinning.
+        const RESYNC_LIMIT: usize = 1 << 20;
+        for _ in 0..RESYNC_LIMIT {
+            buf.copy_within(1..HEADER_LEN, 0);
+            let mut b = [0u8; 1];
+            if read_exact_or_eof(&mut self.source, &mut b)? == 0 {
+                return Err(Error::InvalidStream("stream ends without a valid page"));
+            }
+            buf[HEADER_LEN - 1] = b[0];
+            if &buf[0..4] == CAPTURE_PATTERN {
+                return Ok(Some(buf));
+            }
+        }
+        Err(Error::InvalidStream(
+            "no Ogg page found while resynchronising",
+        ))
+    }
+}
+
+fn read_exact<R: Read>(source: &mut R, buf: &mut [u8]) -> Result<()> {
+    if read_exact_or_eof(source, buf)? < buf.len() {
+        return Err(Error::InvalidStream("stream ends inside a page"));
+    }
+    Ok(())
+}
+
+/// Fill `buf`, returning how many bytes were read; short only at EOF.
+fn read_exact_or_eof<R: Read>(source: &mut R, buf: &mut [u8]) -> Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match source.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(Error::Io(e)),
+        }
+    }
+    Ok(filled)
+}
+
+/// Iterator over an [`OggOpusReader`]'s remaining packets, from
+/// [`OggOpusReader::packets`].
+#[derive(Debug)]
+pub struct Packets<'a, R: Read> {
+    reader: &'a mut OggOpusReader<R>,
+    /// Set once the stream has ended or errored, so a caller who keeps polling
+    /// gets `None` rather than the same error for ever.
+    done: bool,
+}
+
+impl<R: Read> Iterator for Packets<'_, R> {
+    type Item = Result<OggPacket>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        match self.reader.read_packet() {
+            Ok(Some(p)) => Some(Ok(p)),
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
