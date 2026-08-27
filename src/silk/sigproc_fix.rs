@@ -1277,11 +1277,24 @@ unsafe fn silk_sum_sqr_shift_avx2(x: &[i16], len: usize, shft: i32) -> i32 {
     let sum1 = _mm_add_epi32(sum2, _mm_srli_si128(sum2, 4));
     let mut nrg = _mm_cvtsi128_si32(sum1);
 
-    while i < len {
+    // `_mm256_madd_epi16` above already sums each pair before the shift, which
+    // is what the reference does; the tail has to keep that pairing. Walking it
+    // one sample at a time — as this kernel used to — truncates once per sample
+    // instead of once per pair and drifts low by roughly half an LSB per extra
+    // sample. SILK is fixed point: that difference reaches the bitstream. The
+    // vector loop consumes 16 at a time, so `i` is even here and these pairs
+    // line up with the reference's.
+    while i + 1 < len {
+        let a = x[i] as i32;
+        let b = x[i + 1] as i32;
+        let sq = ((a * a) as u32).wrapping_add((b * b) as u32);
+        nrg = nrg.wrapping_add((sq >> shft) as i32);
+        i += 2;
+    }
+    if i < len {
         let v = x[i] as i32;
         let sq = (v * v) as u32;
         nrg = nrg.wrapping_add((sq >> shft) as i32);
-        i += 1;
     }
 
     nrg
