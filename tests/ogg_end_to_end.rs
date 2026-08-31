@@ -207,8 +207,9 @@ fn corrupted_container_is_reported() {
 ///
 /// This checks the final granule against the durations in the packets' own TOC
 /// bytes, so it audits the muxer rather than trusting its arithmetic. An
-/// over-claim is always a bug; an under-claim is legal end-trimming, which this
-/// writer does not currently emit.
+/// over-claim is always a bug; an under-claim is legal end-trimming, which
+/// `write_packet` never produces on its own — `tests/ogg_gapless.rs` covers the
+/// streams that ask for one through `write_packet_with_duration`.
 #[test]
 fn granule_never_claims_more_audio_than_the_packets_carry() {
     for &(rate, channels) in &[(48_000i32, 1usize), (48_000, 2), (16_000, 1), (8_000, 1)] {

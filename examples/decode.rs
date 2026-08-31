@@ -5,11 +5,17 @@
 //! Opus always decodes at a rate you choose, not one stored in the file, so the
 //! output rate is an argument. `OpusHead::input_sample_rate` records what the
 //! original was, and is used as the default.
+//!
+//! A decoded Opus stream is longer than the audio that went into it at both
+//! ends, and `Trim` takes both ends off: the encoder delay at the front and the
+//! final granule's end-trim at the back. Real `opusenc` files carry the second
+//! one, so leaving it out appends up to a frame of padding past the end of the
+//! audio — silent on a clip played once, an audible gap at the seam of a loop.
 
 #[path = "common/wav.rs"]
 mod wav;
 
-use opus_pure::{OggOpusReader, OpusDecoder};
+use opus_pure::{MAX_PACKET_SAMPLES, OggOpusReader, Trim};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -49,37 +55,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  {comment}");
     }
 
-    let frame = (rate / 50) as usize;
-    let mut decoder = OpusDecoder::new(rate, channels)?;
-    // RFC 7845 §5.1: the header carries a gain and players SHOULD apply it.
-    // The decoder applies it in the same pass, ahead of any clipping.
-    decoder.gain_q8 = head.output_gain_q8 as i32;
+    // `decoder` carries the channel count and the header's output gain, which
+    // RFC 7845 §5.1 says a player should apply and which is silent when it is
+    // missed: the file simply plays at the wrong level.
+    let mut decoder = head.decoder(rate)?;
+    let mut trim = Trim::new(&head, rate, channels)?;
+
+    // Sized for the longest packet Opus allows, so the loop does not care what
+    // frame size the file was made with. `decode` returns what it produced.
+    let mut block = vec![0.0f32; MAX_PACKET_SAMPLES * channels];
     let mut samples = Vec::new();
-    let mut out = vec![0.0f32; frame * channels];
     let mut packets = 0usize;
 
     for packet in reader.packets() {
-        let n = decoder.decode(&packet?.data, frame, &mut out)?;
-        samples.extend_from_slice(&out[..n * channels]);
+        let packet = packet?;
+        let n = decoder.decode(&packet.data, MAX_PACKET_SAMPLES, &mut block)?;
+        samples.extend_from_slice(trim.keep(&packet, &block[..n * channels]));
         packets += 1;
     }
 
-    // The first `pre_skip` samples are the encoder's algorithmic delay, expressed
-    // at 48 kHz — scale it to the decode rate before trimming.
-    let skip = (head.pre_skip as usize * rate as usize / 48_000) * channels;
-    let trimmed = samples.split_off(skip.min(samples.len()));
-    let per_channel = trimmed.len() / channels;
-
+    let per_channel = trim.samples_emitted();
     wav::write(
         &args[2],
         &wav::Wav {
             sample_rate: rate as u32,
             channels: head.channel_count as u16,
-            samples: trimmed,
+            samples,
         },
     )?;
     println!(
-        "  {packets} packets -> {} ({rate} Hz, {per_channel} samples/ch = {:.2} s after pre-skip)",
+        "  {packets} packets -> {} ({rate} Hz, {per_channel} samples/ch = {:.2} s of audio)",
         args[2],
         per_channel as f64 / rate as f64,
     );

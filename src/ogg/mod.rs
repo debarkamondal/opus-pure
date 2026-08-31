@@ -16,6 +16,12 @@
 //! either wrong yields a file that decodes but seeks and reports its duration
 //! incorrectly.
 //!
+//! The granule positions are also what says where the audio *ends*: Opus codes
+//! whole frames, so the last one is padded, and RFC 7845 §4.4 has the final
+//! granule claim fewer samples than its packets carry. [`Trim`] applies that
+//! and the pre-skip on the way out;
+//! [`OggOpusWriter::write_packet_with_duration`] states it on the way in.
+//!
 //! # Scope
 //!
 //! One logical bitstream per file. Chained streams (several logical bitstreams
@@ -27,10 +33,12 @@ mod crc;
 mod header;
 mod page;
 mod reader;
+mod trim;
 mod writer;
 
 pub use header::{GRANULE_RATE, OpusHead, OpusTags};
 pub use reader::{OggOpusReader, OggPacket};
+pub use trim::Trim;
 pub use writer::OggOpusWriter;
 
 #[cfg(test)]

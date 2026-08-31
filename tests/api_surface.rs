@@ -76,6 +76,75 @@ fn multistream_surround_round_trips() {
     }
 }
 
+/// A surround stream's declared output gain must be reachable, and must work.
+///
+/// RFC 7845 §5.1 says a player SHOULD apply the gain a file declares, and says
+/// nothing about mapping family. `OpusHead::decoder` carries it on the mono and
+/// stereo path; on the surround path `streams_mut` is the only route to it, and
+/// without one the gain could not be applied at all — a file that plays at the
+/// wrong level with no other symptom.
+#[test]
+fn a_surround_decoder_can_apply_the_headers_output_gain() {
+    let (rate, channels, frame) = (48_000i32, 6usize, 960usize);
+    let mono = music_like(rate, frame * 4);
+    let mut src = Vec::with_capacity(frame * 4 * channels);
+    for &sample in mono.iter().take(frame * 4) {
+        for c in 0..channels {
+            src.push(sample * (1.0 - c as f32 * 0.1));
+        }
+    }
+
+    let mut enc = OpusMSEncoder::new(rate, channels, 1, Application::Audio).unwrap();
+    let mut pkt = vec![0u8; 8000];
+    let mut packets = Vec::new();
+    for f in 0..4 {
+        let len = enc
+            .encode(
+                &src[f * frame * channels..(f + 1) * frame * channels],
+                frame,
+                &mut pkt,
+            )
+            .unwrap();
+        packets.push(pkt[..len].to_vec());
+    }
+
+    // -1536 in Q7.8 dB is -6 dB, an amplitude ratio of 10^(-6/20).
+    let decode = |gain_q8: i32| {
+        let mut dec = OpusMSDecoder::new(rate, channels, 1).unwrap();
+        assert_eq!(dec.streams().len(), dec.nb_streams());
+        for d in dec.streams_mut() {
+            d.gain_q8 = gain_q8;
+        }
+        let mut out = Vec::new();
+        let mut block = vec![0.0f32; frame * channels];
+        for p in &packets {
+            let n = dec.decode(p, frame, &mut block).unwrap();
+            out.extend_from_slice(&block[..n * channels]);
+        }
+        out
+    };
+
+    let plain = decode(0);
+    let quiet = decode(-1536);
+    assert_eq!(plain.len(), quiet.len());
+
+    // Compare energies rather than samples: the gain is applied per stream, so
+    // every output channel must come back scaled, not just the coupled pair.
+    let want = 10f32.powf(-6.0 / 20.0);
+    for c in 0..channels {
+        let (a, b) = (
+            energy(&deinterleave(&plain, channels, c)),
+            energy(&deinterleave(&quiet, channels, c)),
+        );
+        assert!(a > 1e-9, "channel {c} decoded to silence at unity gain");
+        let ratio = (b / a).sqrt();
+        assert!(
+            (ratio - want).abs() < 0.01,
+            "channel {c}: gain applied as {ratio:.4}x, expected {want:.4}x"
+        );
+    }
+}
+
 /// `Signal` must actually steer the mode decision, or it is a setting that
 /// silently does nothing.
 #[test]
@@ -540,6 +609,64 @@ fn header_pre_skip_follows_the_encoder_not_a_constant() {
     let enc = OpusEncoder::new(16_000, 1, Application::Audio).unwrap();
     assert_eq!(OpusHead::for_encoder(&enc, 16_000).pre_skip, 312);
     assert_eq!(enc.lookahead(), 104, "312 at 48 kHz is 104 at 16 kHz");
+}
+
+/// A decoder built from the header carries the three facts the header holds,
+/// including the one that is silent when it is missed.
+///
+/// A wrong channel count fails loudly and a wrong pre-skip shifts the audio
+/// audibly, but a dropped `output_gain_q8` only plays the file at the wrong
+/// level. RFC 7845 §5.1 says a player SHOULD apply it.
+#[test]
+fn a_decoder_built_from_the_header_carries_its_gain() {
+    use opus_pure::OpusHead;
+
+    let mut head = OpusHead::new(2, 48_000).unwrap();
+    head.output_gain_q8 = -1536; // -6 dB
+    let decoder = head.decoder(24_000).unwrap();
+    assert_eq!(decoder.channels(), 2);
+    assert_eq!(decoder.sample_rate(), 24_000);
+    assert_eq!(decoder.gain_q8, -1536);
+    assert!((head.output_gain_db() - -6.0).abs() < 1e-3);
+
+    // A surround stream is not a plain `OpusDecoder`, and saying so beats
+    // decoding one stream of several.
+    let surround = OpusHead::for_layout(&opus_pure::ChannelLayout::surround(6, 1).unwrap(), 48_000);
+    assert!(matches!(
+        surround.decoder(48_000),
+        Err(Error::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        head.decoder(44_100),
+        Err(Error::InvalidArgument(_))
+    ));
+}
+
+/// The decode-side buffer size, so no caller has to write `rate / 1000 * 120`.
+///
+/// `MAX_PACKET_SAMPLES` is the companion to `MAX_PACKET_BYTES` on the way in: a
+/// buffer of that many samples per channel must take the longest packet Opus
+/// can describe, at any rate.
+#[test]
+fn the_decode_buffer_size_is_a_constant_not_a_magic_number() {
+    use opus_pure::{MAX_PACKET_SAMPLES, packet};
+
+    assert_eq!(MAX_PACKET_SAMPLES, 5760);
+
+    // 120 ms of CELT at 48 kHz is the longest packet there is.
+    let mut enc = OpusEncoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut pkt = vec![0u8; opus_pure::MAX_PACKET_BYTES];
+    let n = enc
+        .encode(&music_like(48_000, 5760 * 2), 5760, &mut pkt)
+        .unwrap();
+    assert_eq!(packet::samples(&pkt[..n], 48_000).unwrap(), 5760);
+
+    let mut dec = OpusDecoder::new(48_000, 2).unwrap();
+    let mut out = vec![0.0f32; MAX_PACKET_SAMPLES * 2];
+    assert_eq!(
+        dec.decode(&pkt[..n], MAX_PACKET_SAMPLES, &mut out).unwrap(),
+        5760
+    );
 }
 
 /// A surround header can be built without re-deriving the layout by hand.

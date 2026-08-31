@@ -26,10 +26,24 @@ const DEFAULT_PAGE_TARGET: usize = 4096;
 ///
 /// let file = std::fs::File::create("out.opus")?;
 /// let mut w = OggOpusWriter::new(file, OpusHead::new(2, 48_000)?)?;
-/// // w.write_packet(&packet, 960)?;  // one 20 ms stereo frame
+/// // w.write_packet(&packet)?;  // duration read from the packet itself
 /// w.finish()?;
 /// # Ok::<(), opus_pure::Error>(())
 /// ```
+///
+/// # Ending the file where the audio ends
+///
+/// Opus codes whole frames, so a clip that is not a whole number of frames long
+/// is padded with silence on the way in and decodes longer than it started.
+/// RFC 7845 §4.4 fixes that with an end-trim: the final granule position
+/// deliberately claims fewer samples than the packets carry, and a player stops
+/// there. [`write_packet_with_duration`](OggOpusWriter::write_packet_with_duration)
+/// is how this writer states it, and [`examples/encode.rs`][ex] works the
+/// arithmetic through. Without it a round trip comes back up to one frame long,
+/// with the encoder delay lost off the end instead — audible at the seam of a
+/// loop, and the reason the padding is worth getting right.
+///
+/// [ex]: https://github.com/stephenberry/opus-pure/blob/main/examples/encode.rs
 pub struct OggOpusWriter<W: Write> {
     /// `None` only after `finish` has taken it.
     sink: Option<W>,
@@ -123,6 +137,32 @@ impl<W: Write> OggOpusWriter<W> {
     /// with [`with_serial`](OggOpusWriter::with_serial).
     pub fn serial(&self) -> u32 {
         self.serial
+    }
+
+    /// The granule position the stream has reached: the 48 kHz samples every
+    /// packet written so far decodes to, pre-skip included (RFC 7845 §4).
+    ///
+    /// This is what makes an end-trim a subtraction rather than a derivation.
+    /// The final granule a gapless file wants is the header's pre-skip plus the
+    /// audio; read this immediately before writing the last packet and the
+    /// difference is that packet's duration:
+    ///
+    /// ```no_run
+    /// # use opus_pure::{OggOpusWriter, OpusHead};
+    /// # let (head, packet, audio_48k) = (OpusHead::new(1, 48_000)?, &[0xfcu8][..], 96_000u64);
+    /// # let mut writer = OggOpusWriter::new(Vec::new(), head.clone())?;
+    /// let final_granule = u64::from(head.pre_skip) + audio_48k;
+    /// let duration = final_granule - writer.granule() as u64;
+    /// writer.write_packet_with_duration(packet, duration as u32)?;
+    /// # Ok::<(), opus_pure::Error>(())
+    /// ```
+    ///
+    /// Computing the same number from a frame count instead would work only for
+    /// a stream whose packets were all the same duration, which Opus does not
+    /// require and which one call to
+    /// [`write_packet`](Self::write_packet) with a different frame size breaks.
+    pub fn granule(&self) -> i64 {
+        self.granule
     }
 
     /// Payload bytes to accumulate before a page is flushed, clamped to what a

@@ -50,7 +50,7 @@ Signals come from `tests/common/mod.rs`, included by path rather than copied, so
 - `oggmode.py '<glob>'` — the mode sequence of each file's packets, from their TOC bytes.
 - `seam.py <config_name> <channels>` — every run of differing samples in one stream, with its offset from the nearest mode switch. This is the tool to reach for when `report.py` reports a stray.
 - `compare.py [dir]` — the older flat per-file table (max diff, SNR, bit-exact %). Still useful for eyeballing one directory.
-- `dec` — decode one `.opus` to raw f32le at 48 kHz through our reader and decoder, applying pre-skip and end trimming the way `opusdec` does.
+- `dec` — decode one `.opus` to raw f32le at 48 kHz through our reader and decoder, applying pre-skip and end trimming the way `opusdec` does. The trimming is the crate's own `Trim`, not a copy of the arithmetic: this harness used to be the only place in the repository that got it right.
 - `plc <pkt_out> <pcm_out> <rate> <ch> <bitrate> <bw> <app> <signal> <frame_ms> <frames> [lost,...]` — encode a stream, write its packets, and decode them with the given ones dropped. Paired with `cplc`, which does the same through libopus, it is how concealment is held against the reference; [`../plc/run.sh`](../plc/run.sh) drives both.
 - `one`, `ms`, `qual`, `stereoprobe`, `stereoqual`, `gen` — single-config probes kept from earlier investigations.
 

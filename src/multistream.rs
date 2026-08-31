@@ -609,6 +609,42 @@ impl OpusMSDecoder {
         self.decoders[0].sample_rate()
     }
 
+    /// The per-stream decoders, so every [`OpusDecoder`] setting is reachable.
+    ///
+    /// The counterpart of [`OpusMSEncoder::streams_mut`], and the only route to
+    /// [`gain_q8`](OpusDecoder::gain_q8) — which is not a nicety. RFC 7845 §5.1
+    /// says a player SHOULD apply the gain a file declares, and it says nothing
+    /// about mapping family, so a surround stream carrying a non-zero
+    /// [`OpusHead::output_gain_q8`](crate::OpusHead::output_gain_q8) plays at
+    /// the wrong level with no other symptom. A multistream decoder is N
+    /// ordinary decoders and the gain belongs on every one of them:
+    ///
+    /// ```
+    /// # use opus_pure::{OpusHead, OpusMSDecoder};
+    /// # let head = OpusHead::for_layout(
+    /// #     &opus_pure::ChannelLayout::surround(6, 1)?, 48_000);
+    /// let mut dec = OpusMSDecoder::new(48_000, 6, head.mapping_family)?;
+    /// for d in dec.streams_mut() {
+    ///     d.gain_q8 = head.output_gain_q8 as i32;
+    /// }
+    /// # Ok::<(), opus_pure::Error>(())
+    /// ```
+    ///
+    /// For mono and stereo, [`OpusHead::decoder`](crate::OpusHead::decoder)
+    /// does this for you and there is nothing to remember.
+    pub fn streams_mut(&mut self) -> &mut [OpusDecoder] {
+        &mut self.decoders
+    }
+
+    /// The per-stream decoders, for reading. See
+    /// [`streams_mut`](Self::streams_mut) to change their settings.
+    ///
+    /// [`final_range`](OpusDecoder::final_range) per stream is what a
+    /// conformance check compares against a reference decoder's.
+    pub fn streams(&self) -> &[OpusDecoder] {
+        &self.decoders
+    }
+
     /// Discard every stream's coding state, as [`OpusDecoder::reset_state`]
     /// does for one.
     pub fn reset_state(&mut self) -> Result<()> {

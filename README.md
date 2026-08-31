@@ -63,43 +63,96 @@ fn encode_to_file(pcm: &[f32], rate: i32, channels: usize, path: &str) -> Result
 
 `finish` must be called. Dropping the writer flushes on a best-effort basis but cannot report an I/O failure.
 
-`chunks_exact` drops a trailing partial frame; pad the last block with zeros if you need the final fraction of a second. [`examples/encode.rs`](examples/encode.rs) does that.
+`chunks_exact` drops a trailing partial frame, so this writes a whole number of frames and loses whatever is left over. That is fine for a stream and not fine for a file. See [Ending the file exactly](#ending-the-file-exactly).
+
+### Ending the file exactly
+
+Opus codes whole frames and runs a few milliseconds behind its input, so a file needs two things to come back as the audio that went into it. Both are in [`examples/encode.rs`](examples/encode.rs); this is the arithmetic on its own.
+
+```rust
+use opus_pure::{Application, MAX_PACKET_BYTES, OggOpusWriter, OpusEncoder, OpusHead, Result};
+
+/// Write `pcm` so that decoding it returns exactly these samples — no padding
+/// on the end, and none of the tail missing.
+fn encode_gapless(pcm: &[f32], rate: i32, channels: usize, path: &str) -> Result<()> {
+    let frame = (rate / 50) as usize;
+    let mut encoder = OpusEncoder::new(rate, channels, Application::Audio)?;
+    let head = OpusHead::for_encoder(&encoder, rate as u32);
+
+    // Every Opus rate divides 48 kHz, so these conversions are exact.
+    let ticks = 48_000 / rate as usize;   // granule ticks per encoder-rate sample
+    let total = pcm.len() / channels;     // sample frames of real audio
+
+    // 1. The encoder is `pre_skip` samples behind, so its last samples are still
+    //    inside it when the input runs out. Feeding that much extra silence is
+    //    what flushes them; then round up, since Opus has no partial frames.
+    let frames = (total + (head.pre_skip as usize).div_ceil(ticks)).div_ceil(frame);
+    // 2. That padding decodes as real output, so the file has to say where the
+    //    audio stopped: the final granule is the pre-skip plus the audio and
+    //    nothing else (RFC 7845 §4.4). The last packet carries the difference
+    //    between that and what the writer has counted so far.
+    let final_granule = u64::from(head.pre_skip) + (total * ticks) as u64;
+
+    let file = std::fs::File::create(path)?;
+    let mut writer = OggOpusWriter::new(std::io::BufWriter::new(file), head)?;
+    let mut packet = vec![0u8; MAX_PACKET_BYTES];
+    let per_frame = frame * channels;
+    let mut block = vec![0.0f32; per_frame];
+
+    for i in 0..frames {
+        let start = (i * per_frame).min(pcm.len());
+        let end = (start + per_frame).min(pcm.len());
+        block[..end - start].copy_from_slice(&pcm[start..end]);
+        block[end - start..].fill(0.0);         // silence past the audio
+
+        let n = encoder.encode(&block, frame, &mut packet)?;
+        if i + 1 == frames {
+            let duration = final_granule - writer.granule() as u64;
+            writer.write_packet_with_duration(&packet[..n], duration as u32)?;
+        } else {
+            writer.write_packet(&packet[..n])?;
+        }
+    }
+    writer.finish()?;
+    Ok(())
+}
+```
+
+`write_packet_with_duration` is the only reason to state a duration by hand; `write_packet` reads the right one out of every other packet. Skip the end-trim and the file plays up to a frame of padding past its own end — inaudible once, an audible gap at every seam of a loop. Skip the extra silence and the last few milliseconds of the audio never leave the encoder.
 
 ### Read one back
 
 ```rust
-use opus_pure::{OggOpusReader, OpusDecoder, Result};
+use opus_pure::{MAX_PACKET_SAMPLES, OggOpusReader, Result, Trim};
 
 /// Decode an `.opus` file to interleaved f32 at `rate` (8/12/16/24/48 kHz).
 fn decode_from_file(path: &str, rate: i32) -> Result<(Vec<f32>, usize)> {
     let file = std::fs::File::open(path)?;
     let mut reader = OggOpusReader::new(std::io::BufReader::new(file))?;
     let channels = reader.head().channel_count as usize;
-    let gain_q8 = reader.head().output_gain_q8 as i32;
-    let pre_skip = reader.head().pre_skip as usize;
 
-    let mut decoder = OpusDecoder::new(rate, channels)?;
-    decoder.gain_q8 = gain_q8;         // the header's output gain (RFC 7845 §5.1)
+    // `decoder` carries the channel count and the header's output gain, which
+    // RFC 7845 §5.1 says a player should apply.
+    let mut decoder = reader.head().decoder(rate)?;
+    // `trim` takes the encoder delay off the front and the end-trim off the
+    // back, so what comes out is the audio and nothing else.
+    let mut trim = Trim::new(reader.head(), rate, channels)?;
 
-    // Size the buffer for the longest packet Opus allows, 120 ms, so the loop
-    // does not care what frame size the file was made with. `decode` returns
-    // how many samples it actually produced.
-    let capacity = (rate as usize / 1000) * 120;
-    let mut block = vec![0.0f32; capacity * channels];
+    // Sized for the longest packet Opus allows, so the loop does not care what
+    // frame size the file was made with. `decode` returns what it produced.
+    let mut block = vec![0.0f32; MAX_PACKET_SAMPLES * channels];
 
     let mut pcm = Vec::new();
     for packet in reader.packets() {
-        let n = decoder.decode(&packet?.data, capacity, &mut block)?;
-        pcm.extend_from_slice(&block[..n * channels]);
+        let packet = packet?;
+        let n = decoder.decode(&packet.data, MAX_PACKET_SAMPLES, &mut block)?;
+        pcm.extend_from_slice(trim.keep(&packet, &block[..n * channels]));
     }
-
-    // The first `pre_skip` samples are the encoder's delay and are not audio.
-    // The count is expressed at 48 kHz, so scale it to the decode rate.
-    let skip = (pre_skip * rate as usize / 48_000) * channels;
-    pcm.drain(..skip.min(pcm.len()));
     Ok((pcm, channels))
 }
 ```
+
+A decoded Opus stream is longer than the audio that went into it at both ends, and dropping either correction is silent. [`Trim`](https://docs.rs/opus-pure/latest/opus_pure/struct.Trim.html) applies both: the pre-skip at the front (RFC 7845 §4.2, the encoder's algorithmic delay) and the end-trim at the back (§4.4, a final granule position deliberately short of the audio). Every file `opusenc` writes carries an end-trim, and so does every file the recipe above writes.
 
 ### Raw packets, without the container
 
@@ -161,7 +214,7 @@ cargo run --release --example encode -- input.wav output.opus 96000
 cargo run --release --example decode -- output.opus roundtrip.wav
 ```
 
-[`examples/encode.rs`](examples/encode.rs) and [`examples/decode.rs`](examples/decode.rs) are the code above with the loose ends tied off: a padded final frame, the header gain applied, and the pre-skip trimmed.
+[`examples/encode.rs`](examples/encode.rs) and [`examples/decode.rs`](examples/decode.rs) are the code above with the loose ends tied off, and they are a matched pair: `roundtrip.wav` holds the same number of samples as `input.wav`, to the sample.
 
 ## Choosing settings
 
@@ -200,11 +253,12 @@ One encoder can change frame size between calls: pass a different `frame_size` a
 
 ## Beyond the basics
 
-- **Surround.** `OpusMSEncoder` and `OpusMSDecoder` handle multistream audio up to 7.1, using the Vorbis channel orders RFC 7845 defines (mapping family 1). `ChannelLayout::surround` derives the stream and coupling counts, and `OpusHead::for_ms_encoder` writes a matching header.
+- **Surround.** `OpusMSEncoder` and `OpusMSDecoder` handle multistream audio up to 7.1, using the Vorbis channel orders RFC 7845 defines (mapping family 1). `ChannelLayout::surround` derives the stream and coupling counts, and `OpusHead::for_ms_encoder` writes a matching header. Both sides expose their per-stream codecs through `streams_mut`, which is where every `OpusEncoder` setting lives and, on the decoder, where the header's output gain has to be set.
 - **Inspecting a packet without decoding it.** The [`packet`](https://docs.rs/opus-pure/latest/opus_pure/packet/) module reads duration, frame count, channel count, coding mode and bandwidth out of a packet without decoding it — what a jitter buffer or a muxer needs.
 - **Repacketizing.** `Repacketizer` merges consecutive packets into one and splits them back apart, including the self-delimiting framing RFC 6716 Appendix B defines.
 - **Packet loss.** `decode` on an empty slice runs concealment. If the encoder had `use_inband_fec` on, `decode_fec` recovers part of a lost frame from the packet *after* it.
 - **Parallel encoding.** `encode_parallel` splits a clip across threads. It is an opt-in path with a documented cost; see [Known limitations](#known-limitations).
+- **Looping a file.** `OggOpusReader` reads forward only. To play a stream again, take the source back with `into_inner`, `rewind` it, and build a new reader over it — the constructor re-reads only the two header pages. Give the decoder a `reset_state()` and the `Trim` a fresh instance at the same time, or the seam carries the previous pass's state. See [Known limitations](#known-limitations) for why this is not a `seek`.
 
 ## What's here
 
@@ -234,7 +288,7 @@ Opus is a bit-exact format on the decoder side and a defined-but-not-bit-exact o
 | Whole streams, 440 configurations | Differ only inside the cross-fade at a mode switch; 433 agree to better than 100 dB SNR |
 | CELT concealment | 83–112 dB, and cannot be exact — see [Known limitations](#known-limitations) |
 
-`cargo test --release` runs all 303 tests in about thirty seconds, and needs nothing installed to do it.
+`cargo test --release` runs all 334 tests in about thirty seconds, and needs nothing installed to do it.
 
 ### In detail
 
@@ -296,6 +350,7 @@ Those numbers, how the comparison is kept fair, why libopus needs two columns ra
 
 - **The decoder's float output is not bounded by ±1**, matching libopus: codec ringing carries samples slightly past it. `decode_s16` handles this for you, and `SoftClip` is there for callers who want the float output and convert it themselves. Only a caller who takes the float and ignores both needs to do anything.
 - **Chunk-parallel encoding is not the serial encode.** `encode_parallel` splits a clip across threads and primes each worker by re-encoding the audio before its chunk, which converges the encoder's state but never exactly: at a chunk boundary one packet was produced by an encoder that did not produce the packet before it, and the rate controllers on either side hold different state. Fully primed, the worst frame lands about 4 dB below a serial encode's; constant bitrate removes nearly all of it. Priming is also redundant work, so the worker count is capped at one per 8 s of audio — `ParallelConfig::plan` reports both before any encoding happens. It is an opt-in path for that reason. See [reference/parallel/](reference/parallel/).
+- **The Ogg reader has no `seek`.** It reads forward from the first packet. Starting again from the beginning is cheap — `into_inner`, rewind the source, construct a new reader — but seeking to an arbitrary point is not offered at all, rather than offered badly: RFC 7845 §4.2 wants roughly 80 ms decoded and discarded before the target, and a seek without that pre-roll lands on a cold decoder and audibly clicks, which is exactly the artifact a seeking player is trying to avoid.
 - **CELT concealment is not bit-exact**, and cannot be: it extrapolates the last pitch period through a 24th-order LPC fit, and that fit turns the last-bit differences in a 1024-sample autocorrelation into coefficient differences a thousand times larger. Concealed CELT frames agree with libopus to 83–112 dB where an ordinary CELT frame agrees to 139. Concealment also feeds the 5 ms cross-fade at a mode switch, so a stream that changes mode differs there by the same amount.
 
 ## License
