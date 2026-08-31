@@ -3,6 +3,7 @@
 use super::header::{GRANULE_RATE, OpusHead};
 use super::reader::OggPacket;
 use crate::{Error, Result};
+use std::ops::Range;
 
 /// Trims an Ogg Opus stream's decoded output back to the original audio.
 ///
@@ -141,6 +142,10 @@ impl Trim {
     /// nothing for: the counting is cumulative, and a packet passed over leaves
     /// the end-trim measuring from the wrong place.
     ///
+    /// A caller that has to hold its position *between* calls wants
+    /// [`keep_range`](Trim::keep_range), which returns the same cut as indices
+    /// into `decoded`.
+    ///
     /// ```
     /// use opus_pure::{OggPacket, OpusHead, Trim};
     ///
@@ -161,13 +166,49 @@ impl Trim {
     /// # Ok::<(), opus_pure::Error>(())
     /// ```
     pub fn keep<'a, T>(&mut self, packet: &OggPacket, decoded: &'a [T]) -> &'a [T] {
+        let audio = self.keep_range(packet, decoded.len());
+        &decoded[audio]
+    }
+
+    /// The same cut as [`keep`](Trim::keep), as indices into the decoded PCM.
+    ///
+    /// `decoded_len` is the length of one packet's interleaved output — what
+    /// would be handed to `keep` — and the range indexes that buffer directly,
+    /// so `&decoded[trim.keep_range(&packet, decoded.len())]` is exactly what
+    /// `keep` returns. Both bounds count interleaved values rather than sample
+    /// frames, and both land on a frame boundary.
+    ///
+    /// Reach for this when the position has to outlive the call — a playback
+    /// path draining one packet across several buffer fills cannot hold a slice
+    /// beside the buffer it borrows, and the trimmed length alone does not say
+    /// where the audio starts, because the pre-skip shortens it from the front
+    /// and the end-trim from the back.
+    ///
+    /// The same rule as `keep` applies: call it for every packet, in order,
+    /// including the ones it returns an empty range for.
+    ///
+    /// ```
+    /// use opus_pure::{OggPacket, OpusHead, Trim};
+    ///
+    /// // One 20 ms mono packet at 48 kHz, 312 samples of pre-skip, on a page
+    /// // whose granule ends the audio early. Both ends are cut, and the range
+    /// // says where — 388 values long, starting at 312.
+    /// let mut head = OpusHead::new(1, 48_000)?;
+    /// head.pre_skip = 312;
+    /// let mut trim = Trim::new(&head, 48_000, 1)?;
+    ///
+    /// let only = OggPacket::new(vec![0xfc], 700, true);
+    /// assert_eq!(trim.keep_range(&only, 960), 312..700);
+    /// # Ok::<(), opus_pure::Error>(())
+    /// ```
+    pub fn keep_range(&mut self, packet: &OggPacket, decoded_len: usize) -> Range<usize> {
         debug_assert_eq!(
-            decoded.len() % self.channels,
+            decoded_len % self.channels,
             0,
             "decoded PCM is not a whole number of {}-channel frames",
             self.channels
         );
-        let total = (decoded.len() / self.channels) as u64;
+        let total = (decoded_len / self.channels) as u64;
 
         // Front: whatever is left of the encoder delay.
         let start = self.skip_remaining.min(total);
@@ -194,7 +235,7 @@ impl Trim {
         }
 
         self.emitted += end - start;
-        &decoded[start as usize * self.channels..end as usize * self.channels]
+        start as usize * self.channels..end as usize * self.channels
     }
 
     /// Samples per channel handed back so far.
@@ -346,6 +387,33 @@ mod tests {
         let block = pcm(960, 1);
         let kept = t.keep(&OggPacket::new(vec![0xfc], -1, true), &block);
         assert_eq!(kept.len(), 648);
+    }
+
+    /// What `keep_range` exists for: a packet cut at both ends hands back a
+    /// slice whose length says how much survived and not which part, and here
+    /// 388 could equally be the first 388 samples or the last.
+    #[test]
+    fn keep_range_locates_a_cut_that_a_length_cannot() {
+        let mut by_range = Trim::new(&head(312, 1), 48_000, 1).unwrap();
+        let mut by_slice = by_range.clone();
+        let block = pcm(960, 1);
+        let only = OggPacket::new(vec![0xfc], 700, true);
+
+        let audio = by_range.keep_range(&only, block.len());
+        assert_eq!(audio, 312..700);
+        assert_eq!(by_slice.keep(&only, &block), &block[audio]);
+        assert_eq!(by_range.samples_emitted(), by_slice.samples_emitted());
+    }
+
+    /// The range indexes interleaved values, so it drops straight into the
+    /// buffer that was decoded into.
+    #[test]
+    fn keep_range_indexes_values_not_frames() {
+        let mut t = Trim::new(&head(312, 2), 48_000, 2).unwrap();
+        assert_eq!(
+            t.keep_range(&OggPacket::new(vec![0xfc], 960, false), 960 * 2),
+            624..1920
+        );
     }
 
     /// Both counts are per channel; the slicing is interleaved.

@@ -2,6 +2,10 @@
 
 Notable changes to this crate, newest first. Nothing is recorded here from before the first public release; what this crate changed relative to the fork it came from is described in [ATTRIBUTION.md](ATTRIBUTION.md).
 
+## Unreleased
+
+- **`Trim::keep_range`** returns the same cut as `keep`, as indices into the decoded PCM, for a playback path that has to hold its position across buffer fills — a borrowed slice cannot, and the trimmed length alone does not say where the audio starts. The README shows the pattern.
+
 ## 0.2.0 — 2026-08-31
 
 - **`Trim` applies RFC 7845's pre-skip and end-trim to a decoded stream.** The documented decode recipe took only the pre-skip, leaving up to a frame of padding past the end of the audio on any file that carries an end-trim — which every `opusenc` file does. README, crate docs and `examples/decode.rs` now use it.

@@ -154,6 +154,71 @@ fn decode_from_file(path: &str, rate: i32) -> Result<(Vec<f32>, usize)> {
 
 A decoded Opus stream is longer than the audio that went into it at both ends, and dropping either correction is silent. [`Trim`](https://docs.rs/opus-pure/latest/opus_pure/struct.Trim.html) applies both: the pre-skip at the front (RFC 7845 §4.2, the encoder's algorithmic delay) and the end-trim at the back (§4.4, a final granule position deliberately short of the audio). Every file `opusenc` writes carries an end-trim, and so does every file the recipe above writes.
 
+### Playing it back a buffer at a time
+
+A file read all at once can take `Trim::keep` and its slice. A player cannot: the audio device asks for however many samples it wants, whenever it wants them, and what is left of the last packet has to survive until the next call. [`keep_range`](https://docs.rs/opus-pure/latest/opus_pure/struct.Trim.html#method.keep_range) is `keep` as indices for exactly that. The trimmed length alone does not say where the audio starts, because the pre-skip cuts the front and the end-trim the back.
+
+```rust
+use opus_pure::{MAX_PACKET_SAMPLES, OggOpusReader, OpusDecoder, Result, Trim};
+use std::io::Read;
+use std::ops::Range;
+
+struct Playback<R: Read> {
+    reader: OggOpusReader<R>,
+    decoder: OpusDecoder,
+    trim: Trim,
+    channels: usize,
+    /// One packet, decoded.
+    block: Vec<f32>,
+    /// The part of `block` that is audio and has not been handed out yet.
+    /// Indices rather than a slice: this outlives the call that produced it.
+    pending: Range<usize>,
+}
+
+impl<R: Read> Playback<R> {
+    fn new(source: R, rate: i32) -> Result<Self> {
+        let reader = OggOpusReader::new(source)?;
+        let channels = reader.head().channel_count as usize;
+        Ok(Self {
+            decoder: reader.head().decoder(rate)?,
+            trim: Trim::new(reader.head(), rate, channels)?,
+            block: vec![0.0f32; MAX_PACKET_SAMPLES * channels],
+            channels,
+            pending: 0..0,
+            reader,
+        })
+    }
+
+    /// Fills `out` with interleaved audio, decoding as it runs out, and pads
+    /// with silence at the end of the stream. Returns how much of it is audio.
+    fn fill(&mut self, out: &mut [f32]) -> Result<usize> {
+        let mut written = 0;
+        while written < out.len() {
+            while self.pending.is_empty() {
+                // A packet can trim to nothing — the pre-skip covers the whole
+                // of it, or the end-trim already fell — so this loops.
+                let Some(packet) = self.reader.read_packet()? else {
+                    out[written..].fill(0.0); // the device's buffer arrives dirty
+                    return Ok(written);
+                };
+                let n = self
+                    .decoder
+                    .decode(&packet.data, MAX_PACKET_SAMPLES, &mut self.block)?;
+                self.pending = self.trim.keep_range(&packet, n * self.channels);
+            }
+            let take = (out.len() - written).min(self.pending.len());
+            let src = self.pending.start..self.pending.start + take;
+            out[written..written + take].copy_from_slice(&self.block[src]);
+            self.pending.start += take;
+            written += take;
+        }
+        Ok(written)
+    }
+}
+```
+
+Nothing is staged in between: the decode buffer is the staging buffer, and each sample is written once, straight into the device's buffer. Give the decoder a `reset_state()` and the `Trim` a fresh instance if the source is rewound to loop.
+
 ### Raw packets, without the container
 
 If the framing comes from somewhere else — RTP, WebRTC, your own file format — use the encoder and decoder on their own. Nothing above is required.
