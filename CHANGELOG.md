@@ -2,6 +2,17 @@
 
 Notable changes to this crate, newest first. Nothing is recorded here from before the first public release; what this crate changed relative to the fork it came from is described in [ATTRIBUTION.md](ATTRIBUTION.md).
 
+## Unreleased
+
+- **`Trim` applies RFC 7845's pre-skip and end-trim to a decoded stream.** The documented decode recipe took only the pre-skip, leaving up to a frame of padding past the end of the audio on any file that carries an end-trim — which every `opusenc` file does. README, crate docs and `examples/decode.rs` now use it.
+- **The documented encode recipe writes a gapless file.** It flushes the encoder's delay and states the final granule with `write_packet_with_duration`, which existed but appeared in no example. Previously the last few milliseconds of a clip never left the encoder. `tests/ogg_gapless.rs` pins the round trip at every rate.
+- `OpusHead::decoder` builds a decoder carrying the header's channel count and output gain, the one of the two that is silent when it is missed.
+- `MAX_PACKET_SAMPLES` sizes a decode buffer, the companion to `MAX_PACKET_BYTES`.
+- `OggOpusWriter::granule`, so stating an end-trim is a subtraction rather than a derivation from a frame count.
+- `OggPacket::new`, so code that consumes packets can be tested without muxing a stream.
+- `OpusMSDecoder::streams` and `streams_mut`, mirroring the encoder. Without them a surround stream's declared output gain could not be applied at all, which RFC 7845 §5.1 asks a player to do whatever the mapping family.
+- The reader documents rewinding for playback loops. There is still no seek.
+
 ## 0.1.0 — 2026-08-26
 
 First release.

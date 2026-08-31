@@ -9,3 +9,4 @@ Cargo.lock
 /reference/work
 /reference/rust/target
 __pycache__/
+tmp/

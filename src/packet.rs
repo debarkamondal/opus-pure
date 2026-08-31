@@ -27,8 +27,49 @@ use crate::repacketizer::samples_per_frame as toc_samples_per_frame;
 use crate::toc::{bandwidth_from_toc, channels_from_toc, mode_from_toc};
 use crate::{Bandwidth, Error, OpusMode, Result};
 
-/// The longest packet Opus can describe: 120 ms at 48 kHz.
-const MAX_SAMPLES_48K: usize = 5760;
+/// The most samples per channel any Opus packet can decode to, at any rate.
+///
+/// A packet carries at most 120 ms (RFC 6716 §3.2), which is 5760 samples at
+/// 48 kHz and fewer at every lower rate — so a buffer of this many samples per
+/// channel holds the output of any packet a decoder is handed, whatever rate it
+/// was created with and whatever frame size the stream turns out to use.
+///
+/// This is the decode-side companion to
+/// [`MAX_PACKET_BYTES`](crate::MAX_PACKET_BYTES), which sizes the buffer on the
+/// way in. For the exact length of a packet you already hold — rather than the
+/// bound over all of them — use [`samples`].
+///
+/// ```
+/// use opus_pure::{MAX_PACKET_SAMPLES, OpusDecoder};
+///
+/// let channels = 2;
+/// let mut decoder = OpusDecoder::new(48_000, channels)?;
+/// // Sized once, correct for every packet in any stream.
+/// let mut pcm = vec![0.0f32; MAX_PACKET_SAMPLES * channels];
+/// # let _ = (&mut decoder, &mut pcm);
+/// # Ok::<(), opus_pure::Error>(())
+/// ```
+pub const MAX_PACKET_SAMPLES: usize = 5760;
+
+/// [`MAX_PACKET_SAMPLES`] at a rate below 48 kHz, for the bound in [`samples`].
+/// Every Opus rate divides 48 000, so this is exact. The caller has already
+/// checked the rate.
+fn max_samples(sample_rate: i32) -> usize {
+    MAX_PACKET_SAMPLES * sample_rate as usize / 48_000
+}
+
+/// Reject a rate Opus cannot decode at, so a buffer is never sized from one.
+///
+/// The set lives here rather than in each caller so that "which rates does Opus
+/// support" is answered in one place and cannot drift.
+pub(crate) fn check_rate(sample_rate: i32) -> Result<()> {
+    if ![8_000, 12_000, 16_000, 24_000, 48_000].contains(&sample_rate) {
+        return Err(Error::InvalidArgument(
+            "sample rate must be 8, 12, 16, 24 or 48 kHz",
+        ));
+    }
+    Ok(())
+}
 
 /// How many frames the packet holds (RFC 6716 §3.2, frame-packing codes 0-3).
 pub fn frame_count(packet: &[u8]) -> Result<usize> {
@@ -57,18 +98,14 @@ pub fn frame_count(packet: &[u8]) -> Result<usize> {
 /// supports (8/12/16/24/48 kHz); the answer is per channel, so a stereo packet
 /// still reports the number of sample *frames*.
 pub fn samples(packet: &[u8], sample_rate: i32) -> Result<usize> {
-    if ![8_000, 12_000, 16_000, 24_000, 48_000].contains(&sample_rate) {
-        return Err(Error::InvalidArgument(
-            "sample rate must be 8, 12, 16, 24 or 48 kHz",
-        ));
-    }
+    check_rate(sample_rate)?;
     let toc = *packet
         .first()
         .ok_or(Error::InvalidPacket("packet is empty"))?;
     let n = frame_count(packet)? * toc_samples_per_frame(toc, sample_rate) as usize;
     // A packet cannot describe more than 120 ms, so a frame count that implies
     // more is a malformed packet rather than a very long one.
-    if n > MAX_SAMPLES_48K * sample_rate as usize / 48_000 {
+    if n > max_samples(sample_rate) {
         return Err(Error::InvalidPacket("packet claims more than 120 ms"));
     }
     Ok(n)
@@ -80,11 +117,7 @@ pub fn samples(packet: &[u8], sample_rate: i32) -> Result<usize> {
 /// times [`frame_count`] is [`samples`]. Mirrors
 /// `opus_packet_get_samples_per_frame`; `sample_rate` must be one Opus supports.
 pub fn samples_per_frame(packet: &[u8], sample_rate: i32) -> Result<usize> {
-    if ![8_000, 12_000, 16_000, 24_000, 48_000].contains(&sample_rate) {
-        return Err(Error::InvalidArgument(
-            "sample rate must be 8, 12, 16, 24 or 48 kHz",
-        ));
-    }
+    check_rate(sample_rate)?;
     let toc = *packet
         .first()
         .ok_or(Error::InvalidPacket("packet is empty"))?;

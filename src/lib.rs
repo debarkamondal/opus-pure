@@ -62,8 +62,8 @@
 //! # Decoding one back
 //!
 //! ```
-//! use opus_pure::{Application, MAX_PACKET_BYTES, OggOpusReader, OggOpusWriter, OpusDecoder,
-//!                OpusEncoder, OpusHead};
+//! use opus_pure::{Application, MAX_PACKET_BYTES, MAX_PACKET_SAMPLES, OggOpusReader,
+//!                OggOpusWriter, OpusEncoder, OpusHead, Trim};
 //! # let (rate, channels, frame) = (48_000, 2, 960);
 //! # let pcm = vec![0.0f32; frame * channels * 50];
 //! # let mut encoder = OpusEncoder::new(rate, channels, Application::Audio)?;
@@ -75,25 +75,49 @@
 //! # }
 //! # let file: Vec<u8> = writer.finish()?;
 //! let mut reader = OggOpusReader::new(std::io::Cursor::new(&file))?;
-//! let channels = reader.head().channel_count as usize;
-//! let mut decoder = OpusDecoder::new(48_000, channels)?;
+//! let head = reader.head().clone();
+//! let channels = head.channel_count as usize;
 //!
-//! let mut out = vec![0.0f32; 960 * channels];
-//! let mut frames = 0;
+//! // Carries the channel count and the header's output gain.
+//! let mut decoder = head.decoder(48_000)?;
+//! // Takes the encoder delay off the front and the end-trim off the back.
+//! let mut trim = Trim::new(&head, 48_000, channels)?;
+//!
+//! let mut block = vec![0.0f32; MAX_PACKET_SAMPLES * channels];
+//! let mut out = Vec::new();
 //! for packet in reader.packets() {
-//!     decoder.decode(&packet?.data, 960, &mut out)?;
-//!     frames += 1;
+//!     let packet = packet?;
+//!     let n = decoder.decode(&packet.data, MAX_PACKET_SAMPLES, &mut block)?;
+//!     out.extend_from_slice(trim.keep(&packet, &block[..n * channels]));
 //! }
-//! assert_eq!(frames, 50);
+//! // One second in, one second back, less the encoder delay that the stream
+//! // above never flushed — see below.
+//! assert_eq!(trim.samples_emitted(), 48_000 - u64::from(head.pre_skip));
 //! # Ok::<(), opus_pure::Error>(())
 //! ```
 //!
-//! The first [`OpusHead::pre_skip`] samples of the decoded stream are the
-//! encoder's algorithmic delay and should be discarded — that count is expressed
-//! at 48 kHz, so scale it if you decode at another rate. Build the header with
-//! [`OpusHead::for_encoder`] and it is measured from the encoder rather than
-//! assumed; [`OpusHead::new`] uses the conventional 312, which is four
-//! milliseconds too many for [`Application::RestrictedLowDelay`].
+//! # Where a stream begins and ends
+//!
+//! A decoded Opus stream is longer than the audio that went into it at both
+//! ends, and RFC 7845 gives both corrections: the [`pre_skip`](OpusHead::pre_skip)
+//! at the front (§4.2, the encoder's algorithmic delay) and an end-trim at the
+//! back (§4.4, a final granule position deliberately short of what the packets
+//! decode to). [`Trim`] applies the pair, which is worth reaching for even
+//! though it is ten lines: the first correction is conspicuous when it is
+//! missing and the second is silent, and every file `opusenc` writes carries
+//! one.
+//!
+//! Writing them is the same job in reverse, and it is not automatic:
+//! [`OggOpusWriter`] documents the tail arithmetic, and
+//! [`write_packet_with_duration`](OggOpusWriter::write_packet_with_duration) is
+//! what states the end-trim. The example above writes a whole number of frames
+//! and no end-trim, so it comes back one encoder delay short — which is what
+//! that arithmetic exists to fix.
+//!
+//! Build the header with [`OpusHead::for_encoder`] and the pre-skip is measured
+//! from the encoder rather than assumed; [`OpusHead::new`] uses the conventional
+//! 312, which is four milliseconds too many for
+//! [`Application::RestrictedLowDelay`].
 //!
 //! # Working with raw packets
 //!
@@ -167,7 +191,8 @@ pub use decoder::OpusDecoder;
 pub use encoder::{MAX_PACKET_BYTES, OpusEncoder};
 pub use error::{Error, Result};
 pub use multistream::{ChannelLayout, OpusMSDecoder, OpusMSEncoder};
-pub use ogg::{OggOpusReader, OggOpusWriter, OggPacket, OpusHead, OpusTags};
+pub use ogg::{OggOpusReader, OggOpusWriter, OggPacket, OpusHead, OpusTags, Trim};
+pub use packet::MAX_PACKET_SAMPLES;
 pub use parallel::{DEFAULT_WARMUP_MS, ParallelConfig, ParallelPlan, encode_parallel};
 pub use repacketizer::Repacketizer;
 pub use soft_clip::SoftClip;

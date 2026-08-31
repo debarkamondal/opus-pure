@@ -1,7 +1,7 @@
 //! The two mandatory Opus header packets, `OpusHead` and `OpusTags`
 //! (RFC 7845 §5).
 
-use crate::{ChannelLayout, Error, OpusEncoder, OpusMSEncoder, Result};
+use crate::{ChannelLayout, Error, OpusDecoder, OpusEncoder, OpusMSEncoder, Result};
 
 /// Magic signature of the identification header.
 pub(crate) const OPUS_HEAD_MAGIC: &[u8; 8] = b"OpusHead";
@@ -168,6 +168,50 @@ impl OpusHead {
                 layout.mapping.clone()
             },
         }
+    }
+
+    /// A decoder configured for this stream, at `sample_rate`.
+    ///
+    /// Three facts have to travel from the header into the decoder, and only
+    /// one of them announces itself when it is missed. The channel count is
+    /// checked — a decoder built for the wrong one fails or interleaves
+    /// visibly. The pre-skip is what [`Trim`](super::Trim) needs, and it takes
+    /// the header directly. [`output_gain_q8`](Self::output_gain_q8) is the
+    /// silent one: RFC 7845 §5.1 says a player SHOULD apply it, and a stream
+    /// that carries a non-zero gain plays at the wrong level with no other
+    /// symptom if it does not. This constructor carries all three of those
+    /// decisions so none of them is a thing to remember.
+    ///
+    /// `sample_rate` is the rate you want *out*, not one stored in the file:
+    /// Opus decodes to whichever of 8/12/16/24/48 kHz you ask for.
+    ///
+    /// ```no_run
+    /// use opus_pure::OggOpusReader;
+    ///
+    /// let mut reader = OggOpusReader::new(std::fs::File::open("in.opus")?)?;
+    /// let mut decoder = reader.head().decoder(48_000)?;   // gain already set
+    /// # let _ = &mut decoder;
+    /// # Ok::<(), opus_pure::Error>(())
+    /// ```
+    ///
+    /// Only mapping family 0 (mono and stereo) has a plain [`OpusDecoder`]
+    /// behind it; a surround stream needs
+    /// [`OpusMSDecoder`](crate::OpusMSDecoder), built from
+    /// [`channel_count`](Self::channel_count) and
+    /// [`mapping_family`](Self::mapping_family), and this reports that rather
+    /// than quietly decoding one stream of several. Rendering a stream to a
+    /// channel count that is not its own is likewise a case for
+    /// [`OpusDecoder::new`] plus setting
+    /// [`gain_q8`](OpusDecoder::gain_q8) by hand.
+    pub fn decoder(&self, sample_rate: i32) -> Result<OpusDecoder> {
+        if self.mapping_family != 0 {
+            return Err(Error::InvalidArgument(
+                "mapping family is not 0; a surround stream needs an OpusMSDecoder",
+            ));
+        }
+        let mut decoder = OpusDecoder::new(sample_rate, self.channel_count as usize)?;
+        decoder.gain_q8 = i32::from(self.output_gain_q8);
+        Ok(decoder)
     }
 
     /// Serialize to the wire format.

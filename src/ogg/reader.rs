@@ -21,6 +21,33 @@ pub struct OggPacket {
     pub end_of_stream: bool,
 }
 
+impl OggPacket {
+    /// Build a packet directly, without a container to read it out of.
+    ///
+    /// The reader produces these; this exists so code that *consumes* them can
+    /// be tested without muxing a file first. The interesting logic on the
+    /// consuming side is what a caller does with `page_granule` and
+    /// `end_of_stream` — the end-trim arithmetic of RFC 7845 §4.4, which
+    /// [`Trim`](super::Trim) implements — and a test for it should be able to
+    /// state the two edge cases directly rather than construct a stream that
+    /// happens to produce them.
+    ///
+    /// ```
+    /// use opus_pure::OggPacket;
+    ///
+    /// // The last packet of a stream whose final granule trims 160 samples.
+    /// let packet = OggPacket::new(vec![0xfc], 48_000, true);
+    /// assert!(packet.end_of_stream);
+    /// ```
+    pub fn new(data: Vec<u8>, page_granule: i64, end_of_stream: bool) -> Self {
+        OggPacket {
+            data,
+            page_granule,
+            end_of_stream,
+        }
+    }
+}
+
 /// Reads Opus packets out of an Ogg stream (RFC 7845).
 ///
 /// The constructor consumes the two header packets, so [`head`](Self::head) and
@@ -42,6 +69,35 @@ pub struct OggPacket {
 /// }
 /// # Ok::<(), opus_pure::Error>(())
 /// ```
+///
+/// [`head().decoder(rate)`](OpusHead::decoder) builds a decoder configured for
+/// the stream, and [`Trim`](super::Trim) turns its output back into the audio
+/// that was encoded. Decoding without that second step leaves the encoder delay
+/// on the front and the final page's end-trim on the back.
+///
+/// # Reading forward
+///
+/// This reads forward from the first audio packet and does not seek. Playing a
+/// stream again means starting over: take the source back with
+/// [`into_inner`](Self::into_inner), rewind it, and construct a new reader,
+/// which re-reads only the two header pages.
+///
+/// ```no_run
+/// use std::io::Seek;
+/// use opus_pure::OggOpusReader;
+///
+/// let mut reader = OggOpusReader::new(std::fs::File::open("in.opus")?)?;
+/// // ... read to the end of the stream ...
+/// let mut file = reader.into_inner();
+/// file.rewind()?;
+/// reader = OggOpusReader::new(file)?;   // back at the first packet
+/// # Ok::<(), opus_pure::Error>(())
+/// ```
+///
+/// A decoder carried across that boundary needs
+/// [`reset_state`](crate::OpusDecoder::reset_state), and the
+/// [`Trim`](super::Trim) needs replacing, or the second pass begins with the
+/// first one's state and counts.
 pub struct OggOpusReader<R: Read> {
     source: R,
     head: OpusHead,
