@@ -17,7 +17,7 @@ It reads and writes `.opus` files, and it encodes and decodes raw Opus packets f
 
 ```toml
 [dependencies]
-opus-pure = "0.1"
+opus-pure = "0.2"
 ```
 
 Requires Rust 1.88 or newer. Nothing else: there are no optional features to turn on for anything below, and no system libopus needs to be installed. Full API documentation is on [docs.rs](https://docs.rs/opus-pure).

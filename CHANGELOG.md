@@ -2,7 +2,7 @@
 
 Notable changes to this crate, newest first. Nothing is recorded here from before the first public release; what this crate changed relative to the fork it came from is described in [ATTRIBUTION.md](ATTRIBUTION.md).
 
-## Unreleased
+## 0.2.0 — 2026-08-31
 
 - **`Trim` applies RFC 7845's pre-skip and end-trim to a decoded stream.** The documented decode recipe took only the pre-skip, leaving up to a frame of padding past the end of the audio on any file that carries an end-trim — which every `opusenc` file does. README, crate docs and `examples/decode.rs` now use it.
 - **The documented encode recipe writes a gapless file.** It flushes the encoder's delay and states the final granule with `write_packet_with_duration`, which existed but appeared in no example. Previously the last few milliseconds of a clip never left the encoder. `tests/ogg_gapless.rs` pins the round trip at every rate.
