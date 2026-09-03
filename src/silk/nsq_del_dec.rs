@@ -1,3 +1,5 @@
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use crate::cpu_features::FeatureCache;
 use crate::silk::define::*;
 use crate::silk::macros::*;
 use crate::silk::sigproc_fix::*;
@@ -251,17 +253,8 @@ unsafe fn silk_lpc_prediction_avx2(
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn lpc_avx2_enabled() -> bool {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    static STATE: AtomicU8 = AtomicU8::new(0); // 0=unknown, 1=on, 2=off
-    match STATE.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => {
-            let on = is_x86_feature_detected!("avx2");
-            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
-            on
-        }
-    }
+    static CACHE: FeatureCache = FeatureCache::new();
+    CACHE.get(|| is_x86_feature_detected!("avx2"))
 }
 
 #[inline(always)]
@@ -306,17 +299,8 @@ pub(crate) fn silk_noise_shape_quantizer_short_prediction(
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn nsq_shape_avx2_enabled() -> bool {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    static STATE: AtomicU8 = AtomicU8::new(0);
-    match STATE.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => {
-            let on = is_x86_feature_detected!("avx2");
-            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
-            on
-        }
-    }
+    static CACHE: FeatureCache = FeatureCache::new();
+    CACHE.get(|| is_x86_feature_detected!("avx2"))
 }
 
 /// Cross-state warped shaping AR filter over a state-minor SoA buffer
