@@ -63,13 +63,16 @@ pub fn silk_add_rshift(a: i32, b: i32, shift: i32) -> i32 {
 
 #[inline(always)]
 pub fn silk_div32_16(a: i32, b: i32) -> i32 {
-    a / b
+    if b == 0 { 0 } else { a / b }
 }
 
 #[inline(always)]
 pub fn silk_div32_varq(a32: i32, b32: i32, qres: i32) -> i32 {
     debug_assert!(b32 != 0);
     debug_assert!(qres >= 0);
+    if b32 == 0 {
+        return 0;
+    }
 
     let a_headrm = if a32 == 0 {
         31
@@ -113,7 +116,7 @@ pub fn silk_div32_varq(a32: i32, b32: i32, qres: i32) -> i32 {
 
 #[inline(always)]
 pub fn silk_div32(a: i32, b: i32) -> i32 {
-    a / b
+    if b == 0 { 0 } else { a / b }
 }
 
 #[inline(always)]

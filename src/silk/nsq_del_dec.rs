@@ -285,9 +285,9 @@ pub(crate) fn silk_noise_shape_quantizer_short_prediction(
     predict_lpc_order: i32,
 ) -> i32 {
     #[cfg(target_arch = "aarch64")]
-    // SAFETY: aarch64 always has NEON; bounds are guaranteed by SILK frame sizing.
-    unsafe {
-        return silk_lpc_prediction_neon(ps_lpc_q14, idx, a_q12, predict_lpc_order);
+    if idx + 1 >= predict_lpc_order as usize {
+        // SAFETY: aarch64 always has NEON; idx precondition guarantees the loads.
+        return unsafe { silk_lpc_prediction_neon(ps_lpc_q14, idx, a_q12, predict_lpc_order) };
     }
     #[cfg(target_arch = "x86_64")]
     {

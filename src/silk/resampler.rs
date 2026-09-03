@@ -57,17 +57,24 @@ const FIR_COEFS_12_8: [[i16; 8]; 12] = build_fir12_8();
 #[inline]
 fn resampler_fir12_8(buf: &[i16], bi: usize, ti: usize) -> i32 {
     let c = &FIR_COEFS_12_8[ti];
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    {
+        return unsafe { resampler_fir12_8_sse2(&buf[bi..bi + 8], c) };
+    }
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "sse2")))]
     {
         if std::arch::is_x86_feature_detected!("sse2") {
             return unsafe { resampler_fir12_8_sse2(&buf[bi..bi + 8], c) };
         }
     }
-    let mut r = 0i32;
-    for j in 0..8 {
-        r = r.wrapping_add((buf[bi + j] as i32) * (c[j] as i32));
+    #[allow(unreachable_code)]
+    {
+        let mut r = 0i32;
+        for j in 0..8 {
+            r = r.wrapping_add((buf[bi + j] as i32) * (c[j] as i32));
+        }
+        r
     }
-    r
 }
 
 #[cfg(target_arch = "x86_64")]

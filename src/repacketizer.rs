@@ -207,25 +207,55 @@ pub(crate) fn parse_packet(
 /// Take one self-delimited packet from the front of `data` and re-emit it as a
 /// normal Opus packet, also returning how many bytes it consumed.
 ///
+/// Strip self-delimited framing into `out` directly without reallocating frames.
+pub(crate) fn take_self_delimited_into(data: &[u8], out: &mut Vec<u8>) -> Result<usize> {
+    let (toc, frames, consumed) = parse_packet(data, true)?;
+    let count = frames.len();
+    out.clear();
+    if count == 1 {
+        out.push(toc & 0xfc); // code 0
+        let (o, l) = frames[0];
+        out.extend_from_slice(&data[o..o + l]);
+    } else if count == 2 && frames[0].1 == frames[1].1 {
+        out.push((toc & 0xfc) | 0x1); // code 1
+        for &(o, l) in &frames {
+            out.extend_from_slice(&data[o..o + l]);
+        }
+    } else if count == 2 {
+        out.push((toc & 0xfc) | 0x2); // code 2
+        encode_size(frames[0].1 as i32, out);
+        for &(o, l) in &frames {
+            out.extend_from_slice(&data[o..o + l]);
+        }
+    } else {
+        // Code 3
+        let vbr = frames.iter().any(|&(_, l)| l != frames[0].1);
+        if vbr {
+            out.push((toc & 0xfc) | 0x3);
+            out.push((count as u8) | 0x80);
+            for &(_, l) in frames.iter().take(count - 1) {
+                encode_size(l as i32, out);
+            }
+        } else {
+            out.push((toc & 0xfc) | 0x3);
+            out.push(count as u8);
+        }
+        for &(o, l) in &frames {
+            out.extend_from_slice(&data[o..o + l]);
+        }
+    }
+    Ok(consumed)
+}
+
 /// A multistream packet concatenates its streams in self-delimited form
 /// (RFC 6716 Appendix B): every stream but the last carries an explicit length
 /// for its final frame. [`OpusDecoder`](crate::OpusDecoder) parses only normal
 /// packets, so that prefix has to be removed — handing the self-delimited bytes
 /// straight through makes the decoder read the length as payload.
-pub(crate) fn take_self_delimited(data: &[u8], framesize: i32) -> Result<(Vec<u8>, usize)> {
-    let (toc, frames, consumed) = parse_packet(data, true)?;
-    let rp = Repacketizer {
-        toc,
-        framesize,
-        frames: frames
-            .iter()
-            .map(|&(o, l)| data[o..o + l].to_vec())
-            .collect(),
-        spare: Vec::new(),
-    };
-    let n = rp.frames.len();
+#[allow(dead_code)]
+pub(crate) fn take_self_delimited(data: &[u8], _framesize: i32) -> Result<(Vec<u8>, usize)> {
     let mut out = Vec::new();
-    rp.out_range_full(0, n, None, false, &mut out)?;
+    let consumed = take_self_delimited_into(data, &mut out)?;
     Ok((out, consumed))
 }
 

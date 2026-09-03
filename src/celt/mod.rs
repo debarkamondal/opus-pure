@@ -32,14 +32,36 @@ use crate::range_coder::RangeCoder;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline]
 pub(crate) fn have_avx_fma() -> bool {
-    std::arch::is_x86_feature_detected!("avx") && std::arch::is_x86_feature_detected!("fma")
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::arch::is_x86_feature_detected!("avx")
+                && std::arch::is_x86_feature_detected!("fma");
+            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
 }
 
 /// Companion to [`have_avx_fma`] for kernels declared `avx2,fma`.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline]
 pub(crate) fn have_avx2_fma() -> bool {
-    std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma");
+            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
 }
 
 #[cfg(target_arch = "aarch64")]

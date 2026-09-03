@@ -266,6 +266,8 @@ fn downmix_and_resample(
     x: &[f32],
     y: &mut [f32],
     s: &mut [f32; 3],
+    scratch_downmix: &mut [f32; 1440],
+    scratch_3x: &mut [f32; 1440],
     subframe: usize,
     offset: usize,
     channels: usize,
@@ -281,7 +283,7 @@ fn downmix_and_resample(
     };
     // downmix all channels (c1=0, c2=-2), scale 1/C.
     let scale = 1.0f32 / channels as f32;
-    let mut tmp = vec![0.0f32; subframe];
+    let tmp = &mut scratch_downmix[..subframe];
     for (j, t) in tmp.iter_mut().enumerate() {
         let mut sum = 0.0f32;
         for c in 0..channels {
@@ -290,20 +292,20 @@ fn downmix_and_resample(
         *t = sum * scale;
     }
     match fs {
-        48000 => resampler_down2_hp(s, y, &tmp),
+        48000 => resampler_down2_hp(s, y, tmp),
         24000 => {
-            y[..subframe].copy_from_slice(&tmp);
+            y[..subframe].copy_from_slice(tmp);
             0.0
         }
         16000 => {
             // "Don't do this at home": zero-order-hold 3x then down2.
-            let mut tmp3x = vec![0.0f32; 3 * subframe];
+            let tmp3x = &mut scratch_3x[..3 * subframe];
             for j in 0..subframe {
                 tmp3x[3 * j] = tmp[j];
                 tmp3x[3 * j + 1] = tmp[j];
                 tmp3x[3 * j + 2] = tmp[j];
             }
-            resampler_down2_hp(s, y, &tmp3x)
+            resampler_down2_hp(s, y, tmp3x)
         }
         _ => 0.0,
     }
@@ -341,6 +343,8 @@ pub struct TonalityAnalysisState {
     initialized: bool,
     rnn_state: [f32; MAX_NEURONS],
     downmix_state: [f32; 3],
+    scratch_downmix: [f32; 1440],
+    scratch_3x: [f32; 1440],
     info: [AnalysisInfo; DETECT_SIZE],
 }
 
@@ -376,6 +380,8 @@ impl TonalityAnalysisState {
             initialized: false,
             rnn_state: [0.0; MAX_NEURONS],
             downmix_state: [0.0; 3],
+            scratch_downmix: [0.0; 1440],
+            scratch_3x: [0.0; 1440],
             info: [AnalysisInfo::default(); DETECT_SIZE],
         }
     }
@@ -601,19 +607,19 @@ fn tonality_analysis(
 
     {
         let fill = (len).min(ANALYSIS_BUF_SIZE - tonal.mem_fill);
-        let mut seg = vec![0.0f32; fill.max(1)];
+        let mf = tonal.mem_fill;
         let hp = downmix_and_resample(
             x,
-            &mut seg,
+            &mut tonal.inmem[mf..mf + fill],
             &mut tonal.downmix_state,
+            &mut tonal.scratch_downmix,
+            &mut tonal.scratch_3x,
             fill,
             offset,
             channels,
             tonal.fs,
         );
         tonal.hp_ener_accum += hp;
-        let mf = tonal.mem_fill;
-        tonal.inmem[mf..mf + fill].copy_from_slice(&seg[..fill]);
     }
 
     if tonal.mem_fill + len < ANALYSIS_BUF_SIZE {
@@ -632,8 +638,8 @@ fn tonality_analysis(
     let silence_thresh = 1.0f32 / (1i64 << lsb_depth) as f32;
     let is_silence = tonal.inmem.iter().fold(0.0f32, |m, &v| m.max(v.abs())) <= silence_thresh;
 
-    let mut fft_in = vec![KissCpx::new(0.0, 0.0); N];
-    let mut fft_out = vec![KissCpx::new(0.0, 0.0); N];
+    let mut fft_in = [KissCpx::new(0.0, 0.0); N];
+    let mut fft_out = [KissCpx::new(0.0, 0.0); N];
     let mut tonality = [0.0f32; 240];
     let mut noisiness = [0.0f32; 240];
     for i in 0..N2 {
@@ -647,18 +653,18 @@ fn tonality_analysis(
         .copy_within(ANALYSIS_BUF_SIZE - 240..ANALYSIS_BUF_SIZE, 0);
     let remaining = len - (ANALYSIS_BUF_SIZE - tonal.mem_fill);
     {
-        let mut seg = vec![0.0f32; remaining.max(1)];
         let hp = downmix_and_resample(
             x,
-            &mut seg,
+            &mut tonal.inmem[240..240 + remaining],
             &mut tonal.downmix_state,
+            &mut tonal.scratch_downmix,
+            &mut tonal.scratch_3x,
             remaining,
             offset + ANALYSIS_BUF_SIZE - tonal.mem_fill,
             channels,
             tonal.fs,
         );
         tonal.hp_ener_accum = hp;
-        tonal.inmem[240..240 + remaining].copy_from_slice(&seg[..remaining]);
     }
     tonal.mem_fill = 240 + remaining;
 
