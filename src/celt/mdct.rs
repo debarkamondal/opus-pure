@@ -210,7 +210,7 @@ impl MdctLookup {
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
-            if have_avx() {
+            if super::have_avx() {
                 mdct_tdac_avx(output, window, overlap);
             } else {
                 mdct_tdac_scalar(output, window, overlap);
@@ -343,22 +343,6 @@ fn mdct_backward_post_rotation_scalar(
         output[overlap2 + n2 - 1 - 2 * i] = yi0;
         output[overlap2 + n2 - 2 - 2 * i] = yr1;
         output[overlap2 + 2 * i + 1] = yi1;
-    }
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-#[inline]
-fn have_avx() -> bool {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    static STATE: AtomicU8 = AtomicU8::new(0);
-    match STATE.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => {
-            let on = std::arch::is_x86_feature_detected!("avx");
-            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
-            on
-        }
     }
 }
 

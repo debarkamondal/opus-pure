@@ -6,9 +6,15 @@ use super::header::{OpusHead, OpusTags};
 use super::page::{CAPTURE_PATTERN, HEADER_LEN, MAX_PAGE_PAYLOAD, PageHeader, verify_crc};
 use crate::{Error, Result};
 
-/// Maximum allowed packet size recovered from an Ogg container (16 MiB).
-/// Bounds memory allocation against maliciously crafted streams with unbounded continuing pages.
-pub const MAX_OGG_PACKET_BYTES: usize = 16 * 1024 * 1024;
+/// Largest packet the reader will reassemble from continued pages, 16 MiB.
+///
+/// A packet's own framing bounds its frames but not its padding, so nothing in
+/// the format stops a chain of continued pages from growing `partial` for as
+/// long as the source keeps delivering. This is far above any packet an
+/// encoder produces (a 120 ms packet at the highest rate is under 8 KiB) and
+/// exists only so a hostile stream cannot make the reader allocate without
+/// limit.
+pub(crate) const MAX_OGG_PACKET_BYTES: usize = 16 * 1024 * 1024;
 
 /// One Opus packet recovered from the container.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,9 +299,7 @@ impl<R: Read> OggOpusReader<R> {
             let lace_sz = lace as usize;
             if self.partial.len().saturating_add(lace_sz) > MAX_OGG_PACKET_BYTES {
                 self.partial.clear();
-                return Err(Error::InvalidStream(
-                    "packet exceeds maximum allowed size",
-                ));
+                return Err(Error::InvalidStream("packet exceeds maximum allowed size"));
             }
             self.partial
                 .extend_from_slice(&self.payload_buf[off..off + lace_sz]);

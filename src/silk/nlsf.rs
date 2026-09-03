@@ -127,10 +127,7 @@ pub fn silk_a2nlsf(nlsf: &mut [i16], a_q16: &mut [i32], d: usize) {
                     ffrac += nom / den;
                 }
             } else {
-                let den = (ylo_div - yhi_div) >> (8 - BIN_DIV_STEPS_A2NLSF_FIX);
-                if den != 0 {
-                    ffrac += ylo_div / den;
-                }
+                ffrac += ylo_div / ((ylo_div - yhi_div) >> (8 - BIN_DIV_STEPS_A2NLSF_FIX));
             }
 
             nlsf[root_ix] = ((k as i32) << 8).wrapping_add(ffrac).min(i16::MAX as i32) as i16;

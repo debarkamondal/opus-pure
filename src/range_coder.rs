@@ -306,12 +306,15 @@ impl<'a> RangeCoder<'a> {
         assert!(
             self.offs + self.end_offs <= new_size,
             "RangeCoder::shrink: new_size {} too small for offs {} + end_offs {}",
-            new_size, self.offs, self.end_offs
+            new_size,
+            self.offs,
+            self.end_offs
         );
         assert!(
             new_size <= self.storage,
             "RangeCoder::shrink: new_size {} exceeds storage {}",
-            new_size, self.storage
+            new_size,
+            self.storage
         );
         if self.end_offs > 0 {
             let old_end_start = (self.storage - self.end_offs) as usize;

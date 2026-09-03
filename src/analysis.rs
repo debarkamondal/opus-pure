@@ -19,6 +19,15 @@ use crate::celt::kiss_fft::{KissCpx, KissFftState, opus_fft_impl};
 pub const NB_FRAMES: usize = 8;
 pub const NB_TBANDS: usize = 18;
 pub const ANALYSIS_BUF_SIZE: usize = 720; // 30 ms at 24 kHz
+/// Most samples one `tonality_analysis` call adds to `inmem`: `run_analysis`
+/// hands it at most 20 ms at a time, which is 480 once the length is converted
+/// to the 24 kHz analysis rate at the top of the call.
+const ANALYSIS_STEP: usize = 480;
+/// Length of the downmix scratch `tonality_analysis` keeps. The 48 kHz path
+/// reads two input samples per analysis sample, and the 16 kHz path holds two
+/// thirds of a step three times over, so both need exactly this many; 24 kHz
+/// needs fewer.
+const DOWNMIX_SCRATCH_LEN: usize = 2 * ANALYSIS_STEP;
 pub const DETECT_SIZE: usize = 100;
 pub const ANALYSIS_COUNT_MAX: i32 = 10000;
 pub const LEAK_BANDS: usize = 19;
@@ -266,8 +275,8 @@ fn downmix_and_resample(
     x: &[f32],
     y: &mut [f32],
     s: &mut [f32; 3],
-    scratch_downmix: &mut [f32; 1440],
-    scratch_3x: &mut [f32; 1440],
+    scratch_downmix: &mut [f32; DOWNMIX_SCRATCH_LEN],
+    scratch_3x: &mut [f32; DOWNMIX_SCRATCH_LEN],
     subframe: usize,
     offset: usize,
     channels: usize,
@@ -343,8 +352,8 @@ pub struct TonalityAnalysisState {
     initialized: bool,
     rnn_state: [f32; MAX_NEURONS],
     downmix_state: [f32; 3],
-    scratch_downmix: [f32; 1440],
-    scratch_3x: [f32; 1440],
+    scratch_downmix: [f32; DOWNMIX_SCRATCH_LEN],
+    scratch_3x: [f32; DOWNMIX_SCRATCH_LEN],
     info: [AnalysisInfo; DETECT_SIZE],
 }
 
@@ -380,8 +389,8 @@ impl TonalityAnalysisState {
             initialized: false,
             rnn_state: [0.0; MAX_NEURONS],
             downmix_state: [0.0; 3],
-            scratch_downmix: [0.0; 1440],
-            scratch_3x: [0.0; 1440],
+            scratch_downmix: [0.0; DOWNMIX_SCRATCH_LEN],
+            scratch_3x: [0.0; DOWNMIX_SCRATCH_LEN],
             info: [AnalysisInfo::default(); DETECT_SIZE],
         }
     }

@@ -64,6 +64,23 @@ pub(crate) fn have_avx2_fma() -> bool {
     }
 }
 
+/// Companion for kernels declared `avx` alone (the MDCT's TDAC fold).
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[inline]
+pub(crate) fn have_avx() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::arch::is_x86_feature_detected!("avx");
+            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 
