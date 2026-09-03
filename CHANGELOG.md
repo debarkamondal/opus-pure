@@ -2,6 +2,12 @@
 
 Notable changes to this crate, newest first. Nothing is recorded here from before the first public release; what this crate changed relative to the fork it came from is described in [ATTRIBUTION.md](ATTRIBUTION.md).
 
+## Unreleased
+
+- **Decoding and analysis no longer allocate per packet.** The range decoder borrows the packet instead of copying it, tonality analysis keeps its downmix scratch in the encoder state, the multistream decoder rebuilds each stream's packet into one reused buffer, and the Ogg reader reuses its page buffer.
+- **The Ogg reader caps a reassembled packet at 16 MiB.** A hostile chain of continued pages could previously grow the reader's buffer without limit; it is now refused as an invalid stream.
+- `RangeCoder::shrink` checks its size preconditions in release builds.
+
 ## 0.2.1 — 2026-08-31
 
 - **`Trim::keep_range`** returns the same cut as `keep`, as indices into the decoded PCM, for a playback path that has to hold its position across buffer fills — a borrowed slice cannot, and the trimmed length alone does not say where the audio starts. The README shows the pattern.
